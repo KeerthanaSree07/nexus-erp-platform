@@ -6,7 +6,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_use_setup_script';
 /** Verify the JWT from the `token` cookie and attach `req.user`. */
 export async function authenticate(req, res, next) {
   try {
-    const token = req.cookies?.token;
+    let token = req.cookies?.token;
+    if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      token = req.headers.authorization.slice(7).trim();
+    }
     if (!token) return res.status(401).json({ message: 'Authentication required.' });
 
     const decoded = jwt.verify(token, JWT_SECRET);

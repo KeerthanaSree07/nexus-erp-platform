@@ -7,11 +7,20 @@ import { authenticate } from '../middleware/auth.js';
 import { logActivity } from '../helpers/audit.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_use_setup_script';
-const COOKIE_OPTS = {
-  httpOnly: true,
-  sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 7 * 24 * 60 * 60 * 1000,          // 7 days
+
+export const getCookieOpts = () => {
+  const isHttps =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.CLIENT_ORIGIN && process.env.CLIENT_ORIGIN.startsWith('https://')) ||
+    process.env.COOKIE_SECURE === 'true';
+
+  return {
+    httpOnly: true,
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: Boolean(isHttps),
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    path: '/',
+  };
 };
 
 export const authRouter = Router();
@@ -111,11 +120,12 @@ authRouter.post('/login', loginLimiter, async (req, res) => {
     if (!match) return res.status(401).json({ message: 'Invalid email or password.' });
 
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.cookie('token', token, COOKIE_OPTS);
+    res.cookie('token', token, getCookieOpts());
 
     logActivity(user, 'Signed in', 'User', user._id);
 
     res.json({
+      token,
       user: { id: user._id, name: user.name, email: user.email, role: user.role },
     });
   } catch (err) {
@@ -125,7 +135,7 @@ authRouter.post('/login', loginLimiter, async (req, res) => {
 
 // POST /api/auth/logout
 authRouter.post('/logout', (_req, res) => {
-  res.clearCookie('token', COOKIE_OPTS);
+  res.clearCookie('token', getCookieOpts());
   res.json({ message: 'Signed out.' });
 });
 

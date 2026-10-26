@@ -33,34 +33,79 @@ import { authenticate } from './middleware/auth.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const HOST = '0.0.0.0';
+const PRODUCTION_CLIENT_ORIGIN = 'https://nexus-erp-platform-client.vercel.app';
+
+// Normalize origin strings (trim and remove trailing slashes)
+const normalizeOrigin = (url) => (url ? url.trim().replace(/\/+$/, '') : '');
+
+// Parse comma-separated or single CLIENT_ORIGIN from environment
+const configuredOrigins = (process.env.CLIENT_ORIGIN || '')
+  .split(',')
+  .map(normalizeOrigin)
+  .filter(Boolean);
+
+const allowedOrigins = new Set([
+  normalizeOrigin(PRODUCTION_CLIENT_ORIGIN),
+  ...configuredOrigins,
+]);
+
+export const isOriginAllowed = (origin) => {
+  // Allow requests without Origin (e.g. mobile apps, curl, same-origin, server-to-server)
+  if (!origin) return true;
+  const cleanOrigin = normalizeOrigin(origin);
+  if (allowedOrigins.has(cleanOrigin)) return true;
+  // Allow local development and testing on localhost or 127.0.0.1 (any port)
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin)) return true;
+  return false;
+};
+
+export const corsOptions = {
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Set-Cookie'],
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
+};
 
 // ── Middleware ───────────────────────────────────────────────────────────
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === CLIENT_ORIGIN) {
-        callback(null, true);
-      } else {
-        callback(new Error('Blocked by CORS'));
-      }
-    },
-    credentials: true,
-  })
-);
+// CORS must execute before all API routes and auth middleware
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 app.use(cookieParser());
 
 // ── Database readiness check ──────────────────────────────────────────────
-app.use('/api', (req, res, next) => {
-  if (req.path === '/health') {
+app.use((req, res, next) => {
+  // Never block OPTIONS preflight requests
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  if (req.path === '/health' || req.path === '/api/health') {
     return res.json({
       status: 'ok',
       db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     });
   }
   // Allow logout even if DB is disconnected
-  if (req.path === '/auth/logout') {
+  if (req.path === '/auth/logout' || req.path === '/api/auth/logout') {
+    return next();
+  }
+  // Allow unauthenticated /auth/me checks to return 401 without waiting for DB
+  if (
+    (req.path === '/auth/me' || req.path === '/api/auth/me') &&
+    !req.cookies?.token &&
+    !req.headers.authorization
+  ) {
     return next();
   }
   if (mongoose.connection.readyState !== 1) {
@@ -73,25 +118,25 @@ app.use('/api', (req, res, next) => {
 });
 
 // ── Public routes ───────────────────────────────────────────────────────
-app.use('/api/auth', authRouter);
+app.use(['/api/auth', '/auth'], authRouter);
 
 // ── Protected routes ────────────────────────────────────────────────────
-app.use('/api/products', authenticate, productsRouter);
-app.use('/api/inventory', authenticate, inventoryRouter);
-app.use('/api/orders', authenticate, ordersRouter);
-app.use('/api/purchases', authenticate, purchasesRouter);
-app.use('/api/customers', authenticate, customersRouter);
-app.use('/api/vendors', authenticate, vendorsRouter);
-app.use('/api/employees', authenticate, employeesRouter);
-app.use('/api/leaves', authenticate, leavesRouter);
-app.use('/api/payroll', authenticate, payrollRouter);
-app.use('/api/expenses', authenticate, expensesRouter);
-app.use('/api/payments', authenticate, paymentsRouter);
-app.use('/api/finance', authenticate, financeRouter);
-app.use('/api/settings', authenticate, settingsRouter);
-app.use('/api/analytics', authenticate, analyticsRouter);
-app.use('/api/users', authenticate, usersRouter);
-app.use('/api/activity', authenticate, activityRouter);
+app.use(['/api/products', '/products'], authenticate, productsRouter);
+app.use(['/api/inventory', '/inventory'], authenticate, inventoryRouter);
+app.use(['/api/orders', '/orders'], authenticate, ordersRouter);
+app.use(['/api/purchases', '/purchases'], authenticate, purchasesRouter);
+app.use(['/api/customers', '/customers'], authenticate, customersRouter);
+app.use(['/api/vendors', '/vendors'], authenticate, vendorsRouter);
+app.use(['/api/employees', '/employees'], authenticate, employeesRouter);
+app.use(['/api/leaves', '/leaves'], authenticate, leavesRouter);
+app.use(['/api/payroll', '/payroll'], authenticate, payrollRouter);
+app.use(['/api/expenses', '/expenses'], authenticate, expensesRouter);
+app.use(['/api/payments', '/payments'], authenticate, paymentsRouter);
+app.use(['/api/finance', '/finance'], authenticate, financeRouter);
+app.use(['/api/settings', '/settings'], authenticate, settingsRouter);
+app.use(['/api/analytics', '/analytics'], authenticate, analyticsRouter);
+app.use(['/api/users', '/users'], authenticate, usersRouter);
+app.use(['/api/activity', '/activity'], authenticate, activityRouter);
 
 
 // ── Error handler ───────────────────────────────────────────────────────
@@ -103,25 +148,30 @@ app.use((err, _req, res, _next) => {
 // ── Start ───────────────────────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/nexus-erp';
 
-const server = app.listen(PORT, () => {
-  console.log(`✓ Nexus ERP API listening on http://localhost:${PORT}`);
-});
+const isTestEnv = process.env.NODE_ENV === 'test' || process.argv.some(arg => arg.includes('test'));
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`✗ Port ${PORT} is already in use. Please free port ${PORT} or stop the other process.`);
-  } else {
-    console.error('✗ Server error:', err.message);
-  }
-});
+let server;
+if (!isTestEnv) {
+  server = app.listen(PORT, HOST, () => {
+    console.log(`✓ Nexus ERP API listening on http://${HOST}:${PORT}`);
+  });
 
-process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
-});
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`✗ Port ${PORT} is already in use. Please free port ${PORT} or stop the other process.`);
+    } else {
+      console.error('✗ Server error:', err.message);
+    }
+  });
 
-process.on('SIGINT', () => {
-  server.close(() => process.exit(0));
-});
+  process.on('SIGTERM', () => {
+    server?.close(() => process.exit(0));
+  });
+
+  process.on('SIGINT', () => {
+    server?.close(() => process.exit(0));
+  });
+}
 
 mongoose.connection.on('error', (err) => {
   console.warn(`! MongoDB event error: ${err.message}`);
